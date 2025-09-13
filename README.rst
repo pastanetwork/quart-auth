@@ -211,8 +211,8 @@ For the original Quart-Auth features, the `documentation
 
 For the extended features (user data storage), see the examples in this repository:
 
-- ``example_extended_auth.py`` - Complete working example
-- ``EXTENDED_AUTH_USAGE.md`` - Detailed usage guide
+- ``examples/extended_auth_demo.py`` - Complete working demo
+- ``examples/README.md`` - Detailed examples documentation
 
 If you need help, try searching `stack overflow
 <https://stackoverflow.com/questions/tagged/quart>`_ or ask for help
