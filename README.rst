@@ -1,12 +1,22 @@
-Quart-Auth
-==========
+Quart-Auth Extended
+===================
 
 |Build Status| |docs| |pypi| |python| |license|
 
-Quart-Auth is an extension for `Quart
-<https://gitlab.com/pgjones/quart>`_ to provide for secure cookie
-authentication (session management). It allows for a session to be
-logged in, authenticated and logged out.
+Quart-Auth Extended is a fork of `Quart-Auth
+<https://github.com/pgjones/quart-auth>`_ with additional features for storing
+secure user data in authentication cookies.
+
+**New Features:**
+
+- 🔒 **Store additional user data** securely in authentication cookies
+- ⚡ **orjson optimization** for better performance (optional)
+- 🔄 **100% backward compatible** with original Quart-Auth
+- 🚀 **Serverless-friendly** - no server-side session storage needed
+
+Original Quart-Auth provides secure cookie authentication (session management)
+for `Quart <https://gitlab.com/pgjones/quart>`_. This extended version adds
+the ability to store arbitrary user data directly in the signed cookie.
 
 Usage
 -----
@@ -89,6 +99,59 @@ start and end sessions for a specific ``AuthenticatedUser`` instance,
         logout_user()
         ...
 
+Extended Features
+~~~~~~~~~~~~~~~~~
+
+**Store additional user data securely:**
+
+.. code-block:: python
+
+    from quart_auth import create_user_with_data, login_user, current_user
+
+    @app.route("/login/<username>")
+    async def login(username):
+        # Create user with additional data
+        user = create_user_with_data(
+            auth_id=f"user_{username}",
+            username=username,
+            email=f"{username}@example.com",
+            role="admin" if username == "admin" else "user",
+            preferences={"theme": "dark", "language": "en"}
+        )
+        login_user(user, remember=True)
+        return f"Logged in as {username}"
+
+    @app.route("/profile")
+    @login_required
+    async def profile():
+        return {
+            "auth_id": current_user.auth_id,
+            "username": current_user.get("username"),
+            "email": current_user.get("email"),
+            "role": current_user.get("role"),
+            "preferences": current_user.get("preferences"),
+            "all_data": current_user.user_data
+        }
+
+**Performance optimization with orjson (optional):**
+
+.. code-block:: bash
+
+    # Install with orjson for better performance
+    pip install git+https://github.com/pastanetwork/quart-auth.git
+    pip install orjson
+
+    # Or add to requirements.txt
+    git+https://github.com/pastanetwork/quart-auth.git
+    orjson
+
+**Key benefits:**
+
+- **Serverless-friendly**: All user data stored in signed cookies, no server-side sessions
+- **Secure**: Data is cryptographically signed and encrypted
+- **Fast**: Optional orjson support for better JSON serialization performance
+- **Compatible**: Works as a drop-in replacement for original Quart-Auth
+
 The user (authenticated or not) is available via the global
 ``current_user`` including within templates,
 
@@ -101,14 +164,32 @@ The user (authenticated or not) is available via the global
     async def user():
         return await render_template_string("{{ current_user.is_authenticated }}")
 
+Installation
+------------
+
+**From GitHub (recommended for this extended version):**
+
+.. code-block:: bash
+
+    pip install git+https://github.com/pastanetwork/quart-auth.git
+    pip install orjson  # Optional, for better performance
+
+**Or add to requirements.txt:**
+
+.. code-block:: text
+
+    git+https://github.com/pastanetwork/quart-auth.git
+    orjson
+
 Contributing
 ------------
 
-Quart-Auth is developed on `GitHub
-<https://github.com/pgjones/quart-auth>`_. You are very welcome to
-open `issues <https://github.com/pgjones/quart-auth/issues>`_ or
-propose `pull requests
-<https://github.com/pgjones/quart-auth/pulls>`_.
+This is a fork of the original `Quart-Auth
+<https://github.com/pgjones/quart-auth>`_ by pgjones.
+
+For the extended version, please open issues or pull requests on this fork.
+For the original Quart-Auth, visit the `original repository
+<https://github.com/pgjones/quart-auth>`_.
 
 Testing
 ~~~~~~~
@@ -125,13 +206,18 @@ this will check the code style and run the tests.
 Help
 ----
 
-The Quart-Auth `documentation
-<https://quart-auth.readthedocs.io>`_ is the best places to
-start, after that try searching `stack overflow
+For the original Quart-Auth features, the `documentation
+<https://quart-auth.readthedocs.io>`_ is the best place to start.
+
+For the extended features (user data storage), see the examples in this repository:
+
+- ``example_extended_auth.py`` - Complete working example
+- ``EXTENDED_AUTH_USAGE.md`` - Detailed usage guide
+
+If you need help, try searching `stack overflow
 <https://stackoverflow.com/questions/tagged/quart>`_ or ask for help
-`on gitter <https://gitter.im/python-quart/lobby>`_. If you still
-can't find an answer please `open an issue
-<https://github.com/pgjones/quart-auth/issues>`_.
+`on gitter <https://gitter.im/python-quart/lobby>`_. For issues specific
+to the extended features, please open an issue on this fork's repository.
 
 
 .. |Build Status| image:: https://github.com/pgjones/quart-auth/actions/workflows/ci.yml/badge.svg

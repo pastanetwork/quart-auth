@@ -4,6 +4,13 @@ from enum import auto, Enum
 from hashlib import sha512
 from typing import Any, AsyncGenerator, cast, Dict, Iterable, Literal, Optional, Type, Union
 
+try:
+    import orjson
+    HAS_ORJSON = True
+except ImportError:
+    import json
+    HAS_ORJSON = False
+
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from quart import (
     current_app,
@@ -51,6 +58,33 @@ class _AuthSerializer(URLSafeTimedSerializer):
     ) -> None:
         super().__init__(secret, salt, signer_kwargs={"digest_method": sha512})
 
+    def dumps(self, obj: Any, **kwargs) -> str:
+        """Override dumps to use orjson for dict serialization if available."""
+        if isinstance(obj, dict) and HAS_ORJSON:
+            # Use orjson for better performance with dictionaries
+            json_bytes = orjson.dumps(obj, option=orjson.OPT_SORT_KEYS)
+            json_str = json_bytes.decode('utf-8')
+            return super().dumps(json_str, **kwargs)
+        else:
+            # Use default itsdangerous serialization
+            return super().dumps(obj, **kwargs)
+
+    def loads(self, s: str, **kwargs) -> Any:
+        """Override loads to use orjson for dict deserialization if available."""
+        payload = super().loads(s, **kwargs)
+
+        # If payload is a JSON string (indicating it was serialized with orjson)
+        # and we have orjson available, deserialize it
+        if isinstance(payload, str) and HAS_ORJSON:
+            try:
+                # Try to parse as JSON - if it succeeds, it was a dict
+                return orjson.loads(payload.encode('utf-8'))
+            except (orjson.JSONDecodeError, ValueError):
+                # If it fails, it was just a regular string
+                return payload
+        else:
+            return payload
+
 
 class AuthUser:
     """A base class for users.
@@ -59,13 +93,23 @@ class AuthUser:
     inherit from this.
     """
 
-    def __init__(self, auth_id: Optional[str], action: Action = Action.PASS) -> None:
+    def __init__(self, auth_id: Optional[str], action: Action = Action.PASS, **user_data) -> None:
         self._auth_id = auth_id
         self.action = action
+        self._user_data = user_data
 
     @property
     def auth_id(self) -> Optional[str]:
         return self._auth_id
+
+    @property
+    def user_data(self) -> Dict[str, Any]:
+        """Get the additional user data stored in the token."""
+        return self._user_data.copy()
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Get a specific piece of user data."""
+        return self._user_data.get(key, default)
 
     @property
     async def is_authenticated(self) -> bool:
@@ -162,13 +206,19 @@ class QuartAuth:
 
     def resolve_user(self) -> AuthUser:
         if self.mode == "cookie":
-            auth_id = self.load_cookie()
+            token_data = self.load_cookie()
         else:
-            auth_id = self.load_bearer()
+            token_data = self.load_bearer()
 
-        return self.user_class(auth_id)
+        if isinstance(token_data, dict):
+            auth_id = token_data.get('auth_id')
+            user_data = {k: v for k, v in token_data.items() if k != 'auth_id'}
+            return self.user_class(auth_id, **user_data)
+        else:
+            # Backward compatibility: if token_data is just a string (old format)
+            return self.user_class(token_data)
 
-    def load_cookie(self) -> Optional[str]:
+    def load_cookie(self) -> Union[Optional[str], Optional[Dict[str, Any]]]:
         try:
             token = ""
             if has_request_context():
@@ -180,7 +230,7 @@ class QuartAuth:
         else:
             return self.load_token(token)
 
-    def load_bearer(self) -> Optional[str]:
+    def load_bearer(self) -> Union[Optional[str], Optional[Dict[str, Any]]]:
         try:
             if has_request_context():
                 raw = request.headers["Authorization"]
@@ -194,14 +244,23 @@ class QuartAuth:
             token = raw[6:].strip()
             return self.load_token(token)
 
-    def dump_token(self, auth_id: str, app: Optional[Quart] = None) -> str:
+    def dump_token(self, data: Union[str, Dict[str, Any]], app: Optional[Quart] = None) -> str:
         if app is None:
             app = current_app
 
         serializer = self.serializer_class(app.secret_key, self.salt)
-        return serializer.dumps(auth_id)
 
-    def load_token(self, token: str, app: Optional[Quart] = None) -> Optional[str]:
+        # Handle both string (old format) and dict (new format)
+        if isinstance(data, str):
+            # Backward compatibility: if data is just a string, treat it as auth_id
+            payload = data
+        else:
+            # New format: serialize the entire dictionary
+            payload = data
+
+        return serializer.dumps(payload)
+
+    def load_token(self, token: str, app: Optional[Quart] = None) -> Union[Optional[str], Optional[Dict[str, Any]]]:
         if app is None:
             app = current_app
 
@@ -214,7 +273,8 @@ class QuartAuth:
 
         serializer = self.serializer_class(keys, self.salt)  # type: ignore[arg-type]
         try:
-            return serializer.loads(token, max_age=self.duration)
+            payload = serializer.loads(token, max_age=self.duration)
+            return payload  # Can be either string or dict
         except (BadSignature, SignatureExpired):
             return None
 
@@ -246,7 +306,13 @@ class QuartAuth:
             if self.cookie_samesite == "Strict" and 300 <= response.status_code < 400:
                 warnings.warn("Strict samesite cookies will be ignored on redirects")
 
-            token = self.dump_token(user.auth_id)
+            # Create token data with auth_id and user_data
+            if user._user_data:
+                token_data = {'auth_id': user.auth_id, **user._user_data}
+                token = self.dump_token(token_data)
+            else:
+                # Backward compatibility: if no user_data, just use auth_id
+                token = self.dump_token(user.auth_id)
             response.set_cookie(
                 self.cookie_name,
                 token,

@@ -30,9 +30,11 @@ dependencies = [
     "typing_extensions; python_version < '3.10'",
 
 ]
+
 requires-python = ">=3.9"
 
 [project.optional-dependencies]
+orjson = ["orjson"]
 docs = ["pydata_sphinx_theme"]
 
 [tool.black]

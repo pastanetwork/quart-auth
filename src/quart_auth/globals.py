@@ -97,11 +97,64 @@ def renew_login() -> None:
 
 @asynccontextmanager
 async def authenticated_client(
-    client: TestClientProtocol, auth_id: str
+    client: TestClientProtocol, auth_id: str, **user_data
 ) -> AsyncGenerator[None, None]:
-    async with _find_extension(client.app).authenticated_client(client, auth_id) as auth_client:
-        yield auth_client
+    # Create token with user data if provided
+    if user_data:
+        token_data = {'auth_id': auth_id, **user_data}
+        token = _find_extension(client.app).dump_token(token_data, app=client.app)
+    else:
+        token = _find_extension(client.app).dump_token(auth_id, app=client.app)
+
+    extension = _find_extension(client.app)
+    if client.cookie_jar is None or extension.mode != "cookie":
+        raise RuntimeError("Authenticated transactions only make sense with cookies enabled.")
+
+    client.set_cookie(
+        extension.cookie_domain,
+        extension.cookie_name,
+        token,
+        path=extension.cookie_path,
+        domain=extension.cookie_domain,
+        secure=extension.cookie_secure,
+        httponly=extension.cookie_http_only,
+        samesite=extension.cookie_samesite,
+    )
+
+    try:
+        yield
+    finally:
+        client.delete_cookie(
+            extension.cookie_domain,
+            extension.cookie_name,
+            path=extension.cookie_path,
+            domain=extension.cookie_domain,
+        )
 
 
-def generate_auth_token(client: TestClientProtocol, auth_id: str) -> str:
-    return _find_extension(client.app).dump_token(auth_id, app=client.app)
+def generate_auth_token(client: TestClientProtocol, auth_id: str, **user_data) -> str:
+    """Generate an authentication token for testing.
+
+    Arguments:
+        client: The test client to use.
+        auth_id: The user's auth_id.
+        **user_data: Additional data to store in the token.
+    """
+    if user_data:
+        token_data = {'auth_id': auth_id, **user_data}
+        return _find_extension(client.app).dump_token(token_data, app=client.app)
+    else:
+        return _find_extension(client.app).dump_token(auth_id, app=client.app)
+
+
+def create_user_with_data(auth_id: str, **user_data) -> AuthUser:
+    """Create an AuthUser with additional data.
+
+    Arguments:
+        auth_id: The user's auth_id.
+        **user_data: Additional data to store with the user.
+
+    Returns:
+        An AuthUser instance with the provided data.
+    """
+    return AuthUser(auth_id, **user_data)
