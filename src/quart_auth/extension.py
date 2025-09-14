@@ -1,5 +1,7 @@
+import time
 import warnings
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from enum import auto, Enum
 from hashlib import sha512
 from typing import Any, AsyncGenerator, cast, Dict, Iterable, Literal, Optional, Type, Union
@@ -27,6 +29,7 @@ from werkzeug.exceptions import Unauthorized as WerkzeugUnauthorized
 
 DEFAULTS = {
     "QUART_AUTH_ATTRIBUTE_NAME": "_quart_auth_user",
+    "QUART_AUTH_AUTO_RENEW_ON_MODIFICATION": True,
     "QUART_AUTH_BASIC_USERNAME": None,
     "QUART_AUTH_BASIC_PASSWORD": None,
     "QUART_AUTH_COOKIE_DOMAIN": None,
@@ -42,6 +45,11 @@ DEFAULTS = {
 
 
 class Unauthorized(WerkzeugUnauthorized):
+    pass
+
+
+class UserDataModificationError(RuntimeError):
+    """Raised when trying to modify user data for an unauthenticated user."""
     pass
 
 
@@ -86,37 +94,109 @@ class _AuthSerializer(URLSafeTimedSerializer):
             return payload
 
 
-class AuthUser:
-    """A base class for users.
+class AuthUser(dict):
+    """A base class for users that behaves like a mutable dictionary.
 
     Any specific user implementation used with Quart-Auth should
-    inherit from this.
+    inherit from this. The user data is stored separately from auth_id,
+    and modifications automatically trigger cookie updates.
     """
 
-    def __init__(self, auth_id: Optional[str], action: Action = Action.PASS, **user_data) -> None:
+    def __init__(self, auth_id: Optional[str], action: Action = Action.PASS, remember_me: bool = False, expires_at: Optional[int] = None, **user_data) -> None:
+        super().__init__(user_data)
         self._auth_id = auth_id
         self.action = action
         self._user_data = user_data
+        self._remember_me = remember_me
+        self._expires_at = expires_at
 
     @property
     def auth_id(self) -> Optional[str]:
         return self._auth_id
 
     @property
+    def remember_me(self) -> bool:
+        """Check if this user session should be remembered (permanent cookie)."""
+        return self._remember_me
+
+    @property
+    def expires_at(self) -> Optional[datetime]:
+        """Get the expiration datetime of the session."""
+        if self._expires_at is None:
+            return None
+        return datetime.fromtimestamp(self._expires_at)
+
+    @property
+    def remaining(self) -> Optional[timedelta]:
+        """Get the remaining time before session expires."""
+        if self._expires_at is None:
+            return None
+        expires = datetime.fromtimestamp(self._expires_at)
+        remaining = expires - datetime.now()
+        return remaining if remaining.total_seconds() > 0 else timedelta(0)
+
+    @property
     def user_data(self) -> Dict[str, Any]:
-        """Get the additional user data stored in the token."""
+        """Get a copy of the user data."""
         return self._user_data.copy()
 
     def get(self, key: str, default: Any = None) -> Any:
         """Get a specific piece of user data."""
         return self._user_data.get(key, default)
 
+    def _trigger_update(self) -> None:
+        """Trigger cookie update while preserving WRITE_PERMANENT based on remember_me."""
+        # Check if user is authenticated before allowing modifications
+        if self._auth_id is None:
+            raise UserDataModificationError(
+                "Cannot modify user data: user is not authenticated. "
+                "Please log in first or use @login_required decorator."
+            )
+
+        # Use remember_me property to determine if should be permanent
+        if self._remember_me:
+            self.action = Action.WRITE_PERMANENT
+        else:
+            self.action = Action.WRITE
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        super().__setitem__(key, value)
+        self._user_data[key] = value
+        # Trigger cookie update while preserving permanence
+        self._trigger_update()
+
+    def __delitem__(self, key: str) -> None:
+        super().__delitem__(key)
+        if key in self._user_data:
+            del self._user_data[key]
+        # Trigger cookie update while preserving permanence
+        self._trigger_update()
+
+    def update(self, *args, **kwargs) -> None:
+        super().update(*args, **kwargs)
+        self._user_data.update(*args, **kwargs)
+        # Trigger cookie update while preserving permanence
+        self._trigger_update()
+
+    def pop(self, key: str, default: Any = None) -> Any:
+        result = super().pop(key, default)
+        self._user_data.pop(key, default)
+        # Trigger cookie update while preserving permanence
+        self._trigger_update()
+        return result
+
+    def clear(self) -> None:
+        super().clear()
+        self._user_data.clear()
+        # Trigger cookie update while preserving permanence
+        self._trigger_update()
+
     @property
     async def is_authenticated(self) -> bool:
         return self._auth_id is not None
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(auth_id={self._auth_id}, action={self.action})"
+        return f"{self.__class__.__name__}(auth_id={self._auth_id}, action={self.action}, data={dict(self)})"
 
 
 class QuartAuth:
@@ -128,6 +208,7 @@ class QuartAuth:
         app: Optional[Quart] = None,
         *,
         attribute_name: str = None,
+        auto_renew_on_modification: Optional[bool] = None,
         cookie_domain: Optional[str] = None,
         cookie_name: Optional[str] = None,
         cookie_path: Optional[str] = None,
@@ -142,6 +223,7 @@ class QuartAuth:
         user_class: Optional[Type[AuthUser]] = None,
     ) -> None:
         self.attribute_name = attribute_name
+        self.auto_renew_on_modification = auto_renew_on_modification
         self.cookie_domain = cookie_domain
         self.cookie_name = cookie_name
         self.cookie_path = cookie_path
@@ -162,6 +244,8 @@ class QuartAuth:
     def init_app(self, app: Quart) -> None:
         if self.attribute_name is None:
             self.attribute_name = _get_config_or_default("QUART_AUTH_ATTRIBUTE_NAME", app)
+        if self.auto_renew_on_modification is None:
+            self.auto_renew_on_modification = _get_config_or_default("QUART_AUTH_AUTO_RENEW_ON_MODIFICATION", app)
         if self.cookie_domain is None:
             self.cookie_domain = _get_config_or_default("QUART_AUTH_COOKIE_DOMAIN", app)
         if self.cookie_name is None:
@@ -212,8 +296,15 @@ class QuartAuth:
 
         if isinstance(token_data, dict):
             auth_id = token_data.get('auth_id')
-            user_data = {k: v for k, v in token_data.items() if k != 'auth_id'}
-            return self.user_class(auth_id, **user_data)
+            remember_me = token_data.get('remember_me', False)
+            expires_at = token_data.get('expires_at')
+            user_data = {k: v for k, v in token_data.items() if k not in ('auth_id', 'remember_me', 'expires_at')}
+
+            # Create user with appropriate action and system data
+            action = Action.WRITE_PERMANENT if remember_me else Action.PASS
+            user = self.user_class(auth_id, action=action, remember_me=remember_me, expires_at=expires_at, **user_data)
+
+            return user
         else:
             # Backward compatibility: if token_data is just a string (old format)
             return self.user_class(token_data)
@@ -298,7 +389,17 @@ class QuartAuth:
         elif user.action in {Action.WRITE, Action.WRITE_PERMANENT}:
             max_age = None
             if user.action == Action.WRITE_PERMANENT:
-                max_age = self.duration
+                # Auto-renewal: enabled by default, can be disabled
+                if self.auto_renew_on_modification:
+                    max_age = self.duration  # Full duration = auto-renewal
+                else:
+                    # No auto-renewal: calculate remaining time from original expiration
+                    if user._expires_at:
+                        remaining = user._expires_at - int(time.time())
+                        max_age = max(0, remaining)  # Don't allow negative
+                    else:
+                        # Fallback if no expires_at (shouldn't happen)
+                        max_age = self.duration
 
             if self.cookie_secure and not request.is_secure:
                 warnings.warn("Secure cookies will be ignored on insecure requests")
@@ -306,12 +407,26 @@ class QuartAuth:
             if self.cookie_samesite == "Strict" and 300 <= response.status_code < 400:
                 warnings.warn("Strict samesite cookies will be ignored on redirects")
 
-            # Create token data with auth_id and user_data
-            if user._user_data:
-                token_data = {'auth_id': user.auth_id, **user._user_data}
+            # Create token data with auth_id, remember_me, expires_at, and user_data
+            remember_me = user.action == Action.WRITE_PERMANENT
+
+            if user._user_data or remember_me:
+                # Add expiration timestamp if permanent
+                token_data = {'auth_id': user.auth_id, 'remember_me': remember_me, **user._user_data}
+
+                if remember_me and max_age:
+                    if self.auto_renew_on_modification:
+                        # Auto-renewal: new expiration time
+                        expires_at = int(time.time()) + max_age
+                    else:
+                        # No auto-renewal: keep original expiration (already in max_age calculation)
+                        expires_at = user._expires_at or (int(time.time()) + max_age)
+
+                    token_data['expires_at'] = expires_at
+
                 token = self.dump_token(token_data)
             else:
-                # Backward compatibility: if no user_data, just use auth_id
+                # Backward compatibility: if no user_data and not permanent, just use auth_id
                 token = self.dump_token(user.auth_id)
             response.set_cookie(
                 self.cookie_name,

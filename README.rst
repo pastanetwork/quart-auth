@@ -9,7 +9,8 @@ secure user data in authentication cookies.
 
 **New Features:**
 
-- 🔒 **Store additional user data** securely in authentication cookies
+- 🔒 **Store and modify user data** securely in authentication cookies
+- 📝 **Mutable current_user** - works exactly like Quart's session
 - ⚡ **orjson optimization** for better performance (optional)
 - 🔄 **100% backward compatible** with original Quart-Auth
 - 🚀 **Serverless-friendly** - no server-side session storage needed
@@ -102,7 +103,7 @@ start and end sessions for a specific ``AuthenticatedUser`` instance,
 Extended Features
 ~~~~~~~~~~~~~~~~~
 
-**Store additional user data securely:**
+**current_user as Mutable Dictionary (like session):**
 
 .. code-block:: python
 
@@ -110,7 +111,7 @@ Extended Features
 
     @app.route("/login/<username>")
     async def login(username):
-        # Create user with additional data
+        # Create user with initial data
         user = create_user_with_data(
             auth_id=f"user_{username}",
             username=username,
@@ -124,14 +125,81 @@ Extended Features
     @app.route("/profile")
     @login_required
     async def profile():
+        # Read user data and session info
         return {
             "auth_id": current_user.auth_id,
             "username": current_user.get("username"),
             "email": current_user.get("email"),
             "role": current_user.get("role"),
             "preferences": current_user.get("preferences"),
-            "all_data": current_user.user_data
+            # System properties (read-only)
+            "remember_me": current_user.remember_me,
+            "expires_at": current_user.expires_at.isoformat() if current_user.expires_at else None
         }
+
+    @app.route("/update-preferences", methods=['POST'])
+    @login_required
+    async def update_preferences():
+        # Modify user data directly like session!
+        current_user['preferences']['theme'] = 'light'
+        current_user['last_updated'] = '2024-03-15'
+        current_user.update({'visit_count': current_user.get('visit_count', 0) + 1})
+
+        # Cookie automatically updated on response!
+        return {"message": "Preferences updated"}
+
+**All dictionary operations work:**
+
+.. code-block:: python
+
+    # Set values
+    current_user['key'] = 'value'
+
+    # Update multiple values
+    current_user.update({'key1': 'value1', 'key2': 'value2'})
+
+    # Delete values
+    del current_user['key']
+    old_value = current_user.pop('key', 'default')
+
+    # Clear all data (keeps auth_id)
+    current_user.clear()
+
+    # Get values
+    value = current_user.get('key', 'default')
+    value = current_user['key']
+
+**System properties (read-only):**
+
+.. code-block:: python
+
+    # Session information
+    is_permanent = current_user.remember_me
+    expiration = current_user.expires_at  # Returns datetime object or None
+    time_left = current_user.remaining    # Returns timedelta object or None
+
+    # Check session expiration
+    if current_user.remaining:
+        from datetime import timedelta
+        if current_user.remaining < timedelta(days=7):
+            print(f"Session expires in {current_user.remaining.days} days!")
+
+        # Or check hours remaining
+        hours_left = current_user.remaining.total_seconds() // 3600
+        print(f"Session expires in {hours_left:.0f} hours")
+
+**Auto-renewal configuration:**
+
+.. code-block:: python
+
+    # Default: auto-renewal enabled
+    auth = QuartAuth(app)
+
+    # Disable auto-renewal (preserve original expiration)
+    auth = QuartAuth(app, auto_renew_on_modification=False)
+
+    # Or via config
+    app.config['QUART_AUTH_AUTO_RENEW_ON_MODIFICATION'] = False
 
 **Performance optimization with orjson (optional):**
 
@@ -147,8 +215,11 @@ Extended Features
 
 **Key benefits:**
 
+- **Session-like**: current_user works exactly like Quart's session - modify data directly
+- **System properties**: Built-in remember_me, expires_at (datetime), auth_id - all read-only
+- **Auto-renewal**: Configurable session renewal on data modification (default: enabled)
 - **Serverless-friendly**: All user data stored in signed cookies, no server-side sessions
-- **Secure**: Data is cryptographically signed and encrypted
+- **Secure**: Data is cryptographically signed and encrypted, system properties protected
 - **Fast**: Optional orjson support for better JSON serialization performance
 - **Compatible**: Works as a drop-in replacement for original Quart-Auth
 
@@ -209,9 +280,9 @@ Help
 For the original Quart-Auth features, the `documentation
 <https://quart-auth.readthedocs.io>`_ is the best place to start.
 
-For the extended features (user data storage), see the examples in this repository:
+For the extended features (mutable current_user), see the examples in this repository:
 
-- ``examples/extended_auth_demo.py`` - Complete working demo
+- ``examples/extended_auth_demo.py`` - Complete demo with data modification and session-like usage
 - ``examples/README.md`` - Detailed examples documentation
 
 If you need help, try searching `stack overflow

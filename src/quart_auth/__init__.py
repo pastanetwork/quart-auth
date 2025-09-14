@@ -1,5 +1,5 @@
 from .basic_auth import basic_auth_required, UnauthorizedBasicAuth
-from .extension import Action, AuthUser, QuartAuth, Unauthorized
+from .extension import Action, AuthUser, QuartAuth, Unauthorized, UserDataModificationError
 from .globals import (
     authenticated_client,
     create_user_with_data,
@@ -26,4 +26,5 @@ __all__ = (
     "QuartAuth",
     "Unauthorized",
     "UnauthorizedBasicAuth",
+    "UserDataModificationError",
 )
