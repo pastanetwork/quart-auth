@@ -147,14 +147,15 @@ def generate_auth_token(client: TestClientProtocol, auth_id: str, **user_data) -
         return _find_extension(client.app).dump_token(auth_id, app=client.app)
 
 
-def create_user_with_data(auth_id: str, **user_data) -> AuthUser:
+def create_user_with_data(auth_id: str, remember_me: bool = False, **user_data) -> AuthUser:
     """Create an AuthUser with additional data.
 
     Arguments:
         auth_id: The user's auth_id.
+        remember_me: Whether this should be a permanent session.
         **user_data: Additional data to store with the user.
 
     Returns:
         An AuthUser instance with the provided data.
     """
-    return AuthUser(auth_id, **user_data)
+    return AuthUser(auth_id, remember_me=remember_me, **user_data)
