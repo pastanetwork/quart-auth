@@ -114,7 +114,6 @@ Extended Features
         # Create user with initial data
         user = create_user_with_data(
             auth_id=f"user_{username}",
-            remember_me=True,  # Will create permanent session
             username=username,
             email=f"{username}@example.com",
             role="admin" if username == "admin" else "user",
