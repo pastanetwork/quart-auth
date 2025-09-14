@@ -58,7 +58,8 @@ async def index() -> ResponseReturnValue:
 
 @app.route("/login/<username>")
 async def login(username: str) -> ResponseReturnValue:
-    # Create a user with additional data stored securely in the cookie
+    # Recommended: Use create_user_with_data() to create users
+    # This is the preferred way to create users with additional data
     user = create_user_with_data(
         auth_id=f"user_{username}",
         username=username,
@@ -71,6 +72,8 @@ async def login(username: str) -> ResponseReturnValue:
             "departments": ["IT", "Security"] if username == "admin" else ["Users"]
         }
     )
+
+    # DON'T DO THIS: AuthUser("user_123", username="john") - use create_user_with_data instead
 
     login_user(user, remember=True)
     return f"""

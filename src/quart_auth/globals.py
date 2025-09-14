@@ -150,11 +150,24 @@ def generate_auth_token(client: TestClientProtocol, auth_id: str, **user_data) -
 def create_user_with_data(auth_id: str, **user_data) -> AuthUser:
     """Create an AuthUser with additional data.
 
+    This is the recommended way to create users for authentication.
+    Use this instead of calling AuthUser() directly.
+
     Arguments:
-        auth_id: The user's auth_id.
-        **user_data: Additional data to store with the user.
+        auth_id: The user's unique identifier (username, email, UUID, etc.).
+        **user_data: Additional data to store with the user (name, email, preferences, etc.).
 
     Returns:
         An AuthUser instance with the provided data.
+
+    Example:
+        .. code-block:: python
+
+            # Recommended usage
+            user = create_user_with_data("user123", name="John Doe", email="john@example.com")
+            login_user(user, remember=True)
+
+            # Not recommended - use create_user_with_data instead
+            user = AuthUser("user123", name="John Doe")  # Don't do this
     """
     return AuthUser(auth_id, **user_data)

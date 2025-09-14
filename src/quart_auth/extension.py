@@ -38,7 +38,8 @@ DEFAULTS = {
     "QUART_AUTH_COOKIE_HTTP_ONLY": True,
     "QUART_AUTH_COOKIE_SAMESITE": "Lax",
     "QUART_AUTH_COOKIE_SECURE": True,
-    "QUART_AUTH_DURATION": 365 * 24 * 60 * 60,  # 1 Year
+    "QUART_AUTH_DURATION": 365 * 24 * 60 * 60,  # 1 Year (for remember_me sessions)
+    "QUART_AUTH_SESSION_DURATION": 24 * 60 * 60,  # 24 hours (for regular sessions)
     "QUART_AUTH_MODE": "cookie",  # "bearer" | "cookie"
     "QUART_AUTH_SALT": "quart auth salt",
 }
@@ -110,6 +111,23 @@ class AuthUser(dict):
         self._remember_me = remember_me
         self._expires_at = expires_at
 
+        # Warn if expires_at is manually set (likely incorrect usage)
+        if expires_at is not None:
+            import inspect
+            frame = inspect.currentframe()
+            try:
+                # Check if called directly by user code (not from quart-auth internals)
+                caller_filename = frame.f_back.f_code.co_filename if frame.f_back else ""
+                if "quart_auth" not in caller_filename:
+                    warnings.warn(
+                        "Manually setting expires_at is not recommended. "
+                        "Use create_user_with_data() instead of AuthUser() directly.",
+                        UserWarning,
+                        stacklevel=2
+                    )
+            finally:
+                del frame
+
     @property
     def auth_id(self) -> Optional[str]:
         return self._auth_id
@@ -156,6 +174,21 @@ class AuthUser(dict):
         # Use remember_me property to determine if should be permanent
         if self._remember_me:
             self.action = Action.WRITE_PERMANENT
+
+            # Auto-renewal pour sessions permanentes selon config
+            try:
+                auth_instance = None
+                for ext in current_app.extensions.get("QUART_AUTH", []):
+                    if hasattr(ext, 'auto_renew_on_modification'):
+                        auth_instance = ext
+                        break
+
+                if auth_instance and auth_instance.auto_renew_on_modification:
+                    # Reset expiration lors de modification si auto_renew activé
+                    self._expires_at = int(time.time()) + auth_instance.duration
+            except (RuntimeError, AttributeError):
+                # Si pas de contexte app ou config non trouvée, on garde l'expiration existante
+                pass
         else:
             self.action = Action.WRITE
 
@@ -216,6 +249,7 @@ class QuartAuth:
         cookie_samesite: Optional[Literal["Strict", "Lax"]] = None,
         cookie_secure: Optional[bool] = None,
         duration: Optional[int] = None,
+        session_duration: Optional[int] = None,
         mode: Optional[Literal["cookie", "bearer"]] = None,
         salt: Optional[str] = None,
         singleton: bool = True,
@@ -231,6 +265,7 @@ class QuartAuth:
         self.cookie_samesite = cookie_samesite
         self.cookie_secure = cookie_secure
         self.duration = duration
+        self.session_duration = session_duration
         self.mode = mode
         self.salt = salt
         self.singleton = singleton
@@ -260,6 +295,8 @@ class QuartAuth:
             self.cookie_secure = _get_config_or_default("QUART_AUTH_COOKIE_SECURE", app)
         if self.duration is None:
             self.duration = _get_config_or_default("QUART_AUTH_DURATION", app)
+        if self.session_duration is None:
+            self.session_duration = _get_config_or_default("QUART_AUTH_SESSION_DURATION", app)
         if self.mode is None:
             self.mode = _get_config_or_default("QUART_AUTH_MODE", app)
         if self.salt is None:
@@ -283,6 +320,7 @@ class QuartAuth:
                 "Multiple singleton extensions, please see docs about multiple auth users"
             )
 
+        app.before_request(self.before_request)
         app.after_request(self.after_request)
         app.after_websocket(self.after_websocket)  # type: ignore
         if self.singleton:
@@ -300,14 +338,51 @@ class QuartAuth:
             expires_at = token_data.get('expires_at')
             user_data = {k: v for k, v in token_data.items() if k not in ('auth_id', 'remember_me', 'expires_at')}
 
+            # Verify server-side expiration
+            if expires_at is not None:
+                current_time = int(time.time())
+                if current_time > expires_at:
+                    # Session has expired server-side, return unauthenticated user
+                    return self.user_class(None)
+
             # Create user with appropriate action and system data
             action = Action.WRITE_PERMANENT if remember_me else Action.PASS
             user = self.user_class(auth_id, action=action, remember_me=remember_me, expires_at=expires_at, **user_data)
+
+            # Auto-renewal for regular sessions (remember_me=False)
+            # Sessions normales se renouvellent à chaque visite
+            if not remember_me and expires_at is not None:
+                # Reset expiration pour sessions normales à chaque requête
+                current_time = int(time.time())
+                new_expires_at = current_time + self.session_duration
+                user._expires_at = new_expires_at
+                user.action = Action.WRITE  # Trigger cookie update
 
             return user
         else:
             # Backward compatibility: if token_data is just a string (old format)
             return self.user_class(token_data)
+
+    async def before_request(self) -> Optional[Response]:
+        """Check if session has expired server-side and mark for deletion."""
+        if self.mode != "cookie":
+            return None
+
+        # Pre-load user to trigger expiration check
+        user = self.load_user()
+
+        # If user was supposed to be authenticated but session expired server-side
+        # we need to delete the cookie
+        if hasattr(request, 'cookies') and self.cookie_name in request.cookies:
+            token_data = self.load_cookie()
+            if isinstance(token_data, dict) and token_data.get('expires_at'):
+                current_time = int(time.time())
+                if current_time > token_data.get('expires_at'):
+                    # Session expired - mark user for cookie deletion
+                    user.action = Action.DELETE
+                    setattr(request_ctx, self.attribute_name, user)
+
+        return None
 
     def load_cookie(self) -> Union[Optional[str], Optional[Dict[str, Any]]]:
         try:
@@ -388,18 +463,14 @@ class QuartAuth:
             )
         elif user.action in {Action.WRITE, Action.WRITE_PERMANENT}:
             max_age = None
-            if user.action == Action.WRITE_PERMANENT:
-                # Auto-renewal: enabled by default, can be disabled
-                if self.auto_renew_on_modification:
-                    max_age = self.duration  # Full duration = auto-renewal
-                else:
-                    # No auto-renewal: calculate remaining time from original expiration
-                    if user._expires_at:
-                        remaining = user._expires_at - int(time.time())
-                        max_age = max(0, remaining)  # Don't allow negative
-                    else:
-                        # Fallback if no expires_at (shouldn't happen)
-                        max_age = self.duration
+            remember_me = user.action == Action.WRITE_PERMANENT
+
+            if remember_me:
+                # Sessions permanentes (remember_me=True)
+                max_age = self.duration  # Cookie expire dans 1 an
+            else:
+                # Sessions normales (remember_me=False)
+                max_age = None  # Pas d'expiration cookie = session browser
 
             if self.cookie_secure and not request.is_secure:
                 warnings.warn("Secure cookies will be ignored on insecure requests")
@@ -408,21 +479,19 @@ class QuartAuth:
                 warnings.warn("Strict samesite cookies will be ignored on redirects")
 
             # Create token data with auth_id, remember_me, expires_at, and user_data
-            remember_me = user.action == Action.WRITE_PERMANENT
-
-            if user._user_data or remember_me:
-                # Add expiration timestamp if permanent
+            if user._user_data or remember_me or user.auth_id:
+                # Always add expiration timestamp for security
                 token_data = {'auth_id': user.auth_id, 'remember_me': remember_me, **user._user_data}
 
-                if remember_me and max_age:
-                    if self.auto_renew_on_modification:
-                        # Auto-renewal: new expiration time
-                        expires_at = int(time.time()) + max_age
-                    else:
-                        # No auto-renewal: keep original expiration (already in max_age calculation)
-                        expires_at = user._expires_at or (int(time.time()) + max_age)
-
-                    token_data['expires_at'] = expires_at
+                # Utiliser l'expiration déjà définie sur l'utilisateur
+                if user._expires_at:
+                    token_data['expires_at'] = user._expires_at
+                elif remember_me:
+                    # Fallback pour sessions permanentes
+                    token_data['expires_at'] = int(time.time()) + self.duration
+                else:
+                    # Fallback pour sessions normales
+                    token_data['expires_at'] = int(time.time()) + self.session_duration
 
                 token = self.dump_token(token_data)
             else:
@@ -485,6 +554,15 @@ class QuartAuth:
 
     def login_user(self, user: AuthUser) -> None:
         if has_request_context():
+            # Ensure user has expiration timestamp if not already set
+            if user._expires_at is None:
+                if user._remember_me:
+                    # Session permanente : utilise duration (ex: 1 an)
+                    user._expires_at = int(time.time()) + self.duration
+                else:
+                    # Session normale : utilise session_duration (ex: 24h)
+                    user._expires_at = int(time.time()) + self.session_duration
+
             setattr(request_ctx, self.attribute_name, user)
         else:
             raise RuntimeError("Cannot login unless within a request context")
